@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Jul 23 23:49:40 2024
-
-@author: YAKE
-"""
-
 import random
 import sys
 import matplotlib.pyplot as plt
@@ -23,10 +16,9 @@ class PPO(nn.Module):
         self.device = device
         self.critic_lr = critic_lr
         self.actor_lr = actor_lr
-        # TODO: try using a learning rate scheduler to dynamically adjust the learning rate based on the training process
         self.gamma = 0.99
         self.lam = 0.95
-        self.epsilon = 0.1  # 0.1~0.2
+        self.epsilon = 0.1
         self.KL_threshold = 1e-2
         self.entropy_coef = 0.05
         self.train_V_iters = 10
@@ -39,8 +31,8 @@ class PPO(nn.Module):
         self.actions = []
         self.log_probs = []
         self.entropies = []
-        self.truncated = False
         
+        self.truncated = False  
         num_h1 = 128
         num_h2 = 64
         self.actor = nn.Sequential(

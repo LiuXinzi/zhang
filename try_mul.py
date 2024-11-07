@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Jul 23 23:49:40 2024
-
-@author: YAKE
-"""
-
 import random
 import sys
 import matplotlib.pyplot as plt
@@ -24,7 +17,6 @@ class PPO(nn.Module):
         self.device = device
         self.critic_lr = critic_lr
         self.actor_lr = actor_lr
-        # PPO hyperparameters
         self.gamma = 0.99
         self.lam = 0.95
         self.epsilon = 0.1
@@ -41,8 +33,6 @@ class PPO(nn.Module):
         self.log_probs = []
         self.entropies = []
         self.truncated = False
-        
-        # Network parameters
         num_h1 = 128
         num_h2 = 64
         self.actor = nn.Sequential(
@@ -95,19 +85,15 @@ class PPO(nn.Module):
     def update(self):
         if not self.rewards:
             return
-
-        # 将多环境的数据转换为张量，确保形状为 [time_steps, env_num, ...]
         rewards = torch.stack([torch.tensor(r, device=self.device, dtype=torch.float32) for r in self.rewards])  # Shape [n, env_num, 1]
         states = torch.stack([torch.stack([torch.tensor(s, dtype=torch.float32, device=self.device) for s in env_states]) for env_states in self.states])  # Shape [n+1, env_num, state_dim]
         actions = torch.stack([torch.tensor(a, device=self.device, dtype=torch.float32) for a in self.actions])  # Shape [n, env_num, action_dim]
         log_probs_old = torch.stack(self.log_probs).detach()  # Shape [n, env_num, 1]
         entropies = torch.stack(self.entropies).detach()  # Shape [n, env_num, 1]
 
-        # 计算 returns，考虑多环境维度
-        returns = torch.zeros_like(rewards)  # Shape [n, env_num, 1]
-        returns[-1] = rewards[-1]  # 设置最后的回报值
 
-        # 处理被截断的轨迹的最后状态值
+        returns = torch.zeros_like(rewards)  # Shape [n, env_num, 1]
+        returns[-1] = rewards[-1]
         if self.truncated:
             with torch.no_grad():
                 last_value = self.critic(states[-1]).detach().squeeze(-1)  # Shape [env_num]
