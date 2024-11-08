@@ -9,7 +9,14 @@ from torch.distributions.normal import Normal
 import torch.nn.functional as F
 import time
 import gymnasium as gym
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import ipdb
+from gymnasium.envs.registration import register
+register(
+    id='MFGIP-v0',
+    entry_point='Inverted_Pendulum:MFG_InvertedPendulum',
+    max_episode_steps=1000
+)
 
 class PPO(nn.Module):
     def __init__(self, n_states, n_actions, device, critic_lr=1e-3, actor_lr=1e-3):
@@ -32,19 +39,16 @@ class PPO(nn.Module):
         self.actions = []
         self.log_probs = []
         self.entropies = []
-        
-        self.truncated = False  
+        self.truncated = False
         num_h1 = 128
         num_h2 = 64
         self.actor = nn.Sequential(
             nn.Linear(n_states, num_h1),
             nn.ReLU(),
-            #nn.Dropout(self.dropout), # Try removing the dropout layer
             nn.Linear(num_h1, num_h2),
             nn.ReLU(),
-            #nn.Dropout(self.dropout),
             nn.Linear(num_h2, n_actions)
-            ).to(self.device)
+        ).to(self.device)
         self._init_weights(self.actor)
         
         self.actor_log_std = nn.Parameter(torch.zeros(n_actions, device=device))
@@ -52,14 +56,13 @@ class PPO(nn.Module):
         self.critic = nn.Sequential(
             nn.Linear(n_states, num_h1),
             nn.ReLU(),
-            #nn.Dropout(self.dropout),
             nn.Linear(num_h1, num_h2),
             nn.ReLU(),
-            #nn.Dropout(self.dropout),
             nn.Linear(num_h2, 1)
-            ).to(self.device)
+        ).to(self.device)
         self._init_weights(self.critic)
         
+        # Optimizers
         self.critic_optimizer = torch.optim.AdamW(self.critic.parameters(), lr=self.critic_lr, weight_decay=1e-4)
         self.actor_optimizer = torch.optim.AdamW(list(self.actor.parameters()) + [self.actor_log_std], lr=self.actor_lr, weight_decay=1e-4)
         
@@ -77,29 +80,28 @@ class PPO(nn.Module):
         value = self.critic(x)
         return mean, std, value
     
-    def sample_action(self, state):
-
-        mean, std, value = self.forward(state)
+    def sample_action(self, states):
+        mean, std, value = self.forward(states)
         dist = Normal(mean, std)
-        action = dist.sample()
-        action = torch.clamp(action, -3, 3)
-        self.log_probs.append(dist.log_prob(action))
+        actions = dist.sample()
+        actions = torch.clamp(actions, -3, 3)
+        self.log_probs.append(dist.log_prob(actions))
         self.entropies.append(dist.entropy())
-        return action.cpu().detach().numpy()
+        return actions.cpu().detach().numpy()
 
-    def update(self):
-        if not self.rewards:
+    def update_once(self,reward_once,state_once,action_once,log_probs_once,entropies_once):
+        if not reward_once.any():
             return
         
-        rewards = torch.tensor(self.rewards, device=self.device, dtype=torch.float32)
-        states = torch.stack([torch.tensor(s, dtype=torch.float32, device=self.device) for s in self.states])
-        actions = torch.tensor(self.actions, device=self.device, dtype=torch.float32)
-        log_probs_old = torch.stack(self.log_probs).squeeze(-1).detach()
-        entropies = torch.stack(self.entropies).squeeze(-1).detach()
+        rewards = torch.tensor(reward_once, device=self.device, dtype=torch.float32)
+        states = torch.stack([torch.tensor(s, dtype=torch.float32, device=self.device) for s in state_once])
+        actions = torch.tensor(action_once, device=self.device, dtype=torch.float32)
+        log_probs_old = log_probs_once.squeeze(-1).detach()
+        entropies = entropies_once.squeeze(-1).detach()
 
         returns = torch.zeros_like(rewards)
         returns[-1] = rewards[-1]
-        
+        # print(rewards.shape)
         if self.truncated:
             with torch.no_grad():
                 last_value = self.critic(states[-1]).detach().squeeze(-1)
@@ -109,8 +111,9 @@ class PPO(nn.Module):
             returns[t] = rewards[t] + self.gamma * returns[t + 1]
         
         for _ in range(self.train_V_iters):
-            ipdb.set_trace()
+            # ipdb.set_trace()
             V_pred = self.critic(states[:-1])
+            # print(V_pred.shape,returns.shape)
             critic_loss =  F.smooth_l1_loss(V_pred.squeeze(-1), returns)
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
@@ -129,7 +132,7 @@ class PPO(nn.Module):
         
         for _ in range(self.train_A_iters):
             mu = self.actor(states[:-1])
-            sigma = torch.exp(self.actor_log_std).expand_as(mu)
+            sigma = torch.exp(self.actor_log_std+self.eps).expand_as(mu)
             dists = Normal(mu,sigma)
             log_probs = dists.log_prob(actions).squeeze()
             r_theta = torch.exp(log_probs - log_probs_old)
@@ -148,6 +151,15 @@ class PPO(nn.Module):
             if approx_kl > self.KL_threshold:
                 break
             
+    def update(self):
+        # ipdb.set_trace()
+        for i in range(len(self.rewards[0])):
+            r=np.array(self.rewards)[:,i]
+            s=np.array(self.states)[:,i,:]
+            a=np.array(self.actions)[:,i,:]
+            l=torch.stack(self.log_probs)[:,i,:]
+            e=torch.stack(self.entropies)[:,i,:]
+            self.update_once(r,s,a,l,e)
         self.log_probs = []
         self.rewards = []
         self.states = []
@@ -155,75 +167,89 @@ class PPO(nn.Module):
         self.entropies = []
         self.truncated = False
         
-from gymnasium.envs.registration import register
-register(
-    id='MFGIP-v0',
-    entry_point='Inverted_Pendulum:MFG_InvertedPendulum',
-    max_episode_steps=1000
-)
 
-env = gym.make("MFGIP-v0")
-wrapped_env = gym.wrappers.RecordEpisodeStatistics(env)
 
-total_num_episodes = 100
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+def make_env(env_id, rank):
+    def _init():
+        env = gym.make(env_id)
+        return env
+    return _init
 
-obs_space_dims = env.observation_space.shape[0]
-action_space_dims = env.action_space.shape[0]
-
-rewards_over_seeds = []
-start_time = time.time()
-initial_entropy_coef = 0.05
-final_entropy_coef = 0.01
-decay_rate = (initial_entropy_coef - final_entropy_coef) / total_num_episodes
-
-for seed in [1]:
-    torch.manual_seed(seed)
-    random.seed(seed)
-    np.random.seed(seed) 
+if __name__ == '__main__':
+    # 其他的主要程序逻辑放在这里
+    num_envs = 3
+    max_steps=1000
+    env_id = "MFGIP-v0"
+    envs = SubprocVecEnv([make_env(env_id, i) for i in range(num_envs)])
     
-    reward_over_episodes = []
-    agent = PPO(obs_space_dims, action_space_dims, device)
+    total_num_episodes = 600
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    obs_space_dims = envs.observation_space.shape[0]
+    action_space_dims = envs.action_space.shape[0]
     
-    for episode in range(total_num_episodes):
-        current_entropy_coef = max(final_entropy_coef, initial_entropy_coef - episode * decay_rate)
-        agent.entropy_coef = current_entropy_coef
+    rewards_over_seeds = []
+    start_time = time.time()
+    initial_entropy_coef = 0.05
+    final_entropy_coef = 0.01
+    decay_rate = (initial_entropy_coef - final_entropy_coef) / total_num_episodes
+    
+    for seed in [1]:
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed) 
         
-        obs, _ = wrapped_env.reset(seed=seed)
-        agent.states.append(obs)
-        done = False
-        while not done:
-            action = agent.sample_action(obs)
-            obs, reward, terminated, truncated, info = wrapped_env.step(action)
-            agent.actions.append(action)
-            agent.rewards.append(reward)
+        reward_over_episodes = []
+        agent = PPO(obs_space_dims, action_space_dims, device)
+
+        for episode in range(total_num_episodes):
+            current_entropy_coef = max(final_entropy_coef, initial_entropy_coef - episode * decay_rate)
+            agent.entropy_coef = current_entropy_coef
+            obs= envs.reset()
             agent.states.append(obs)
-            done = terminated or truncated
-        # ipdb.set_trace()
-        reward_over_episodes.append(info['episode']['r']) if 'episode' in info else 0
-        if truncated:
-            agent.truncated = True
-            
-        agent.update()
-        
-        if episode % 10 == 0 and 'episode' in info:
-            lenth=info['episode']['l'] if 'episode' in info else 'N/A'
-            rewards=info['episode']['r'] if 'episode' in info else 'N/A'
-            print(f"Seed {seed},  Episode {episode}: Total Reward: {rewards/lenth}, Length: {info['episode']['l'] if 'episode' in info else 'N/A'}")
-            
-        
-    rewards_over_seeds.append(reward_over_episodes)
+            done = False
+            itera=0
+            while not done:
+            # for j in range(max_steps):
+                actions = agent.sample_action(obs)
+                obs, rewards, dones, _= envs.step(actions)
+                itera+=1
+                # ipdb.set_trace()
 
-#env.close()
-duration = time.time() - start_time
-print(f"Duration: {duration:.4f} seconds")
-plt.figure()
-for idx, rewards in enumerate(rewards_over_seeds):
-    plt.plot(rewards, label=f'Reward per episode for seed {idx + 1}')
-plt.xlabel('Episodes')
-plt.ylabel('Reward')
-plt.title('Rewards over Episodes for Different Seeds')
-plt.legend()
-plt.grid(True)
-plt.show()
+                agent.actions.append(actions)
+                agent.rewards.append(rewards)
+                agent.states.append(obs)
+                
+                if any(dones):
+                    done=True
+                # for i in range(len(dones)):
+                #     if dones[i]==True:
+                #         # ipdb.set_trace()
+                #         obs[i]=envs.env_method("reset", indices=[i])[0][0]
+                #         dones[i] = False
+                #     else:
+                #         pass
+
+            reward_per_episode=np.sum(agent.rewards)
+            reward_over_episodes.append(reward_per_episode) 
+            if episode % 10 == 0:
+                print(f"Seed {seed},  Episode {episode}: Total Reward: {reward_per_episode}, Len: {itera}")
+            # print(f"e:{episode}")
+            agent.update()
+            
+        rewards_over_seeds.append(reward_over_episodes)
+        
+    #env.close()
+    
+    duration = time.time() - start_time
+    print(f"Duration: {duration:.4f} seconds")
+    plt.figure()
+    for idx, rewards in enumerate(rewards_over_seeds):
+        plt.plot(rewards, label=f'Reward per episode for seed {idx + 1}')
+    plt.xlabel('Episodes')
+    plt.ylabel('Reward')
+    plt.title('Rewards over Episodes for Different Seeds')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
